@@ -1,0 +1,70 @@
+import numpy as np
+import pandas as pd
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+# 1. Ingesting raw NASA OSDR metadata strings from the user's dataset
+data_glds739 = {
+    "Sample_Name": ["GSM8897229", "GSM8897233", "GSM8897237", "GSM8897251", "GSM8897266", "GSM8897271", "GSM8897280", "GSM8897303", "GSM8897336", "GSM8947856", "GSM8947857", "GSM8947858", "GSM8947859"],
+    "Assay_Name": ["miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "miRNA-Seq", "scRNA-Seq", "scRNA-Seq", "scRNA-Seq", "scRNA-Seq"],
+    "Read_Depth":,
+    "rRNA_Contamination_Pct": [33.21, 32.91, 38.12, 19.38, 27.33, 39.32, 28.80, 48.03, 40.97, 32.46, 19.67, 4.57, 7.54],
+    "Flight_Duration_Days": [0, 0, 33, 33, 0, 33, 0, 33, 33, 0, 33, 33, 0] # Mock flight logs matched to controls
+}
+
+df = pd.DataFrame(data_glds739)
+
+# 2. Data Preprocessing Pipeline (Mymana Takual Normalization Protocols)
+# Convert raw sequencing depth to log-transformed capacity metric Y_i
+df["Y_i"] = np.log(df["Read_Depth"] + 1)
+
+# Scale target based on rRNA contamination to isolate technical variance (eps)
+df["Y_scaled"] = df["Y_i"] * (1 - (df["rRNA_Contamination_Pct"] / 100))
+
+# Standardized delta_g environmental vectors (m/s^2)
+# Ground Controls = 0 (baseline delta), Flight Group = -9.8 m/s^2 change
+df["delta_g"] = df["Flight_Duration_Days"].apply(lambda x: -9.8 if x > 0 else 0.0)
+
+
+# 3. Define the Core Optimization Model Function
+def fit_trajectory(X, beta, tau):
+    """
+    Objective optimization function derived from Mymana Takual's 
+    Deterministic Unified Mechanistic Kinetic Model.
+    Optimizes for hidden matrix stiffness (beta) and relaxation time (tau).
+    """
+    t, delta_g = X
+    alpha = 1.345      # Terrestrial baseline constant (Ye et al., 2023)
+    lam = 0.01         # Native human biological radiation sensitivity 
+    R = 0.001          # Constant baseline vehicle dose rate
+    
+    driver = -alpha - beta * delta_g
+    adaptation = 1 - np.exp(-t / tau)
+    radiation = -lam * R * t
+    
+    ln_ratio = driver * adaptation + radiation
+    return ln_ratio
+
+# 4. Global Regression Execution via SciPy Levenberg-Marquardt Algorithm
+t_data = df["Flight_Duration_Days"].values
+dg_data = df["delta_g"].values
+Y_data = df["Y_scaled"].values
+
+# Normalized target scaling to center bounds
+Y_data_centered = (Y_data - np.mean(Y_data)) / np.std(Y_data)
+
+try:
+    popt, pcov = curve_fit(
+        fit_trajectory, 
+        (t_data, dg_data), 
+        Y_data_centered, 
+        p0=[0.145, 39.2], 
+        bounds=(0, [10.0, 100.0]),
+        maxfev=10000
+    )
+    optimized_beta, optimized_tau = popt
+    print(f"✅ Optimization Successful.")
+    print(f"Extracted Biophysical Stiffness (Beta Coefficient): {optimized_beta:.4f}")
+    print(f"Extracted Viscoelastic Relaxation Constant (Tau Matrix): {optimized_tau:.2f} Days")
+except RuntimeError:
+    print("Optimization convergence limit reached. Matrix requires further baseline flattening.")
